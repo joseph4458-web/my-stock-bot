@@ -161,7 +161,6 @@ def evaluate_multi_factors(df, info):
     if div_yield >= 0.04: score += 7
     else: score += 3
 
-    # 🚦 動態邏輯修正：判斷是否有真實跌破季線
     if score >= 80:
         advice = f"🟢(綠燈) 【{score}分 強勢買進】趨勢偏多！建議可於月線 ({ma20:.2f}) 附近逢低建立部位，以季線 ({ma60:.2f}) 為防守。"
         light = "🟢"
@@ -229,12 +228,11 @@ with st.sidebar:
     st.markdown("連線狀態：🟢 **Google 試算表已連線**" if sheet_db else "🟡 **本地離線模式**")
     st.divider()
     
-    # 🔄 新增：深度更新與同步按鈕
     if st.button("🔄 重新讀取與更新報價", use_container_width=True):
         with st.spinner("正在同步雲端資料與最新報價，請稍候..."):
-            st.cache_data.clear() # 清除大盤暫存
+            st.cache_data.clear() 
             
-            # 重新計算並更新觀察清單
+            # 更新觀察清單
             for item in user_watch_list:
                 tk, nm, hist, inf = fetch_data(item["代號"])
                 if hist is not None and not hist.empty:
@@ -248,17 +246,22 @@ with st.sidebar:
                     item["進場建議 (多因子評分)"] = adv
             save_db(user_watch_key, user_watch_list)
             
-            # 重新計算並更新庫存報價
+            # 更新庫存清單 (加入最新AI行動指南)
             for item in user_portfolio:
                 tk, nm, hist, inf = fetch_data(item["代號"])
                 if hist is not None and not hist.empty:
+                    df_tech = compute_technical_indicators(hist)
+                    sc, adv, lgt = evaluate_multi_factors(df_tech, inf)
+                    
                     curr_price = float(hist['Close'].iloc[-1])
                     cost_total = float(item["買進均價"]) * float(item["股數"])
                     market_val = curr_price * float(item["股數"])
+                    
                     item["目前現價"] = round(curr_price, 2)
                     item["總市值"] = int(market_val)
                     item["損益金額"] = int(market_val - cost_total)
                     item["報酬率"] = f"{((curr_price - float(item['買進均價'])) / float(item['買進均價'])) * 100:+.2f}%"
+                    item["行動指南"] = adv
             save_db(user_port_key, user_portfolio)
             
         st.success("✅ 資料同步與評分更新完成！")
@@ -307,7 +310,6 @@ with tab1:
                 else: st.error("查無此股票！")
 
     if user_watch_list:
-        # 🌟 關閉 use_container_width，並設定極寬尺寸強制啟動卷軸
         st.dataframe(
             pd.DataFrame(user_watch_list), 
             use_container_width=False, 
@@ -335,25 +337,51 @@ with tab2:
         st.write("")
         st.write("")
         if st.button("加入庫存", use_container_width=True) and p_tick and p_cost > 0:
-            with st.spinner("獲取報價中..."):
+            with st.spinner("獲取報價與 AI 診斷中..."):
                 ticker, name, hist, info = fetch_data(p_tick)
                 if hist is not None and not hist.empty:
+                    df_tech = compute_technical_indicators(hist)
+                    score, advice, light = evaluate_multi_factors(df_tech, info)
+                    
                     curr_price = float(hist['Close'].iloc[-1])
                     cost_total = int(p_cost * p_shares)
                     market_val = int(curr_price * p_shares)
                     user_portfolio.append({
                         "代號": ticker, "名稱": name, "股數": p_shares, "買進均價": p_cost,
                         "目前現價": round(curr_price, 2), "總成本": cost_total, "總市值": market_val,
-                        "損益金額": market_val - cost_total, "報酬率": f"{((curr_price-p_cost)/p_cost)*100:+.2f}%"
+                        "損益金額": market_val - cost_total, "報酬率": f"{((curr_price-p_cost)/p_cost)*100:+.2f}%",
+                        "行動指南": advice
                     })
                     save_db(user_port_key, user_portfolio)
                     st.rerun()
     
     if user_portfolio:
-        df_p = pd.DataFrame(user_portfolio).fillna(0)
-        total_pnl = df_p['損益金額'].sum() if '損益金額' in df_p.columns else 0
+        df_p = pd.DataFrame(user_portfolio).fillna("")
+        
+        # 清除舊版重複的報酬率欄位
+        if '報酬率 (%)' in df_p.columns and '報酬率' in df_p.columns:
+            df_p = df_p.drop(columns=['報酬率 (%)'])
+            
+        total_pnl = df_p['損益金額'].replace("", 0).sum() if '損益金額' in df_p.columns else 0
         st.metric("總體未實現損益", f"${int(total_pnl):+,}", delta=f"{int(total_pnl):+,}")
-        st.dataframe(df_p, use_container_width=True, hide_index=True)
+        
+        # 🌟 同樣關閉自動縮放，並給予大寬度產生卷軸
+        st.dataframe(
+            df_p, 
+            use_container_width=False, 
+            width=1800,
+            hide_index=True,
+            column_config={
+                "行動指南": st.column_config.TextColumn("行動指南", width=600)
+            }
+        )
+        
+        del_p_idx = st.selectbox("選擇要結清/移除的持股：", range(len(user_portfolio)), 
+                                 format_func=lambda x: f"{user_portfolio[x].get('名稱', '')} ({user_portfolio[x].get('代號', '')})")
+        if st.button("🗑️ 移除此筆庫存"):
+            user_portfolio.pop(del_p_idx)
+            save_db(user_port_key, user_portfolio)
+            st.rerun()
 
 # ------------------------------------------
 # Tab 3: 每日 AI 量化精選 (Top 5)
@@ -373,7 +401,6 @@ with tab3:
             
             top5 = sorted(results, key=lambda x: x["評分"], reverse=True)[:5]
             
-            # 🌟 同樣關閉自動縮放，並給予大寬度產生卷軸
             st.dataframe(
                 pd.DataFrame(top5),
                 use_container_width=False, 
@@ -436,7 +463,7 @@ with tab4:
             else: st.error("查無此股票資料！")
 
 # ==========================================
-# 底部：多因子評分指南 (完美復刻桌面版)
+# 底部：多因子評分指南
 # ==========================================
 st.write("")
 st.write("")
