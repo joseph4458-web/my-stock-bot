@@ -220,6 +220,55 @@ user_port_key = f"port_{username}"
 user_watch_list = load_db(user_watch_key, [])
 user_portfolio = load_db(user_port_key, [])
 
+# ==========================================
+# 側邊欄 (使用者資訊與系統更新)
+# ==========================================
+with st.sidebar:
+    st.title("👤 使用者資訊")
+    st.markdown(f"登入帳號：**{username}**")
+    st.markdown("連線狀態：🟢 **Google 試算表已連線**" if sheet_db else "🟡 **本地離線模式**")
+    st.divider()
+    
+    # 🔄 新增：深度更新與同步按鈕
+    if st.button("🔄 重新讀取與更新報價", use_container_width=True):
+        with st.spinner("正在同步雲端資料與最新報價，請稍候..."):
+            st.cache_data.clear() # 清除大盤暫存
+            
+            # 重新計算並更新觀察清單
+            for item in user_watch_list:
+                tk, nm, hist, inf = fetch_data(item["代號"])
+                if hist is not None and not hist.empty:
+                    df_tech = compute_technical_indicators(hist)
+                    sc, adv, lgt = evaluate_multi_factors(df_tech, inf)
+                    item["現價"] = round(float(df_tech['Close'].iloc[-1]), 2)
+                    change = df_tech['Close'].iloc[-1] - df_tech['Close'].iloc[-2]
+                    change_pct = (change / df_tech['Close'].iloc[-2]) * 100
+                    item["漲跌行情"] = f"{change:+.2f} ({change_pct:+.2f}%)"
+                    item["季線"] = round(float(df_tech['MA60'].iloc[-1]), 2)
+                    item["進場建議 (多因子評分)"] = adv
+            save_db(user_watch_key, user_watch_list)
+            
+            # 重新計算並更新庫存報價
+            for item in user_portfolio:
+                tk, nm, hist, inf = fetch_data(item["代號"])
+                if hist is not None and not hist.empty:
+                    curr_price = float(hist['Close'].iloc[-1])
+                    cost_total = float(item["買進均價"]) * float(item["股數"])
+                    market_val = curr_price * float(item["股數"])
+                    item["目前現價"] = round(curr_price, 2)
+                    item["總市值"] = int(market_val)
+                    item["損益金額"] = int(market_val - cost_total)
+                    item["報酬率"] = f"{((curr_price - float(item['買進均價'])) / float(item['買進均價'])) * 100:+.2f}%"
+            save_db(user_port_key, user_portfolio)
+            
+        st.success("✅ 資料同步與評分更新完成！")
+        time.sleep(1)
+        st.rerun()
+
+    if st.button("🚪 登出系統", use_container_width=True):
+        st.session_state.username = None
+        st.rerun()
+
 st.markdown(f"<h3 style='text-align: center; color: #333;'>{get_market_status()}</h3>", unsafe_allow_html=True)
 st.divider()
 
