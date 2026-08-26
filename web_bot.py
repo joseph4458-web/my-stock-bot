@@ -30,6 +30,10 @@ def init_gsheet():
     try:
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
+            
+            # 👇 加入這行無敵代碼！強制把普通字串的 \n 轉回真正的換行符號
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            
             scopes = [
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive"
