@@ -29,7 +29,6 @@ yf_session.headers.update({
 def init_gsheet():
     try:
         if "GCP_JSON" in st.secrets:
-            # 直接以標準 JSON 載入，原生保留 \n 換行符號
             creds_dict = json.loads(st.secrets["GCP_JSON"])
             scopes = [
                 "https://www.googleapis.com/auth/spreadsheets",
@@ -42,6 +41,44 @@ def init_gsheet():
     except Exception as e:
         st.warning(f"⚠️ 雲端資料庫連線提示: {e}")
     return None
+
+# 務必確保在 load_db 與 save_db 之前宣告此變數
+sheet_db = init_gsheet()
+
+# 載入與儲存函式（自動切換雲端或本地）
+def load_db(table_name, default_val):
+    if sheet_db:
+        try:
+            worksheet = sheet_db.worksheet(table_name)
+            data = worksheet.get_all_records()
+            return data if data else default_val
+        except:
+            return default_val
+    else:
+        # 本地備用模式
+        file_name = f"{table_name}.json"
+        if os.path.exists(file_name):
+            with open(file_name, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return default_val
+
+def save_db(table_name, data):
+    if sheet_db:
+        try:
+            try:
+                worksheet = sheet_db.worksheet(table_name)
+            except:
+                worksheet = sheet_db.add_worksheet(title=table_name, rows="100", cols="20")
+            worksheet.clear()
+            if data:
+                df = pd.DataFrame(data)
+                worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        except Exception as e:
+            st.error(f"存檔至 Google 試算表失敗: {e}")
+    else:
+        file_name = f"{table_name}.json"
+        with open(file_name, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
 
 # 載入與儲存函式（自動切換雲端或本地）
 def load_db(table_name, default_val):
