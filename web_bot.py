@@ -264,7 +264,15 @@ with tab1:
                 else: st.error("查無此股票！")
 
     if user_watch_list:
-        st.dataframe(pd.DataFrame(user_watch_list), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(user_watch_list), 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                # 🌟 強制設定寬度為 600px，這樣表格就會自動出現左右拉動的卷軸
+                "進場建議 (多因子評分)": st.column_config.TextColumn("進場建議 (多因子評分)", width=600)
+            }
+        )
         del_ticker = st.selectbox("選擇要刪除的標的：", [item["代號"] for item in user_watch_list], key="del_w")
         if st.button("🗑️ 刪除選取標的"):
             user_watch_list = [item for item in user_watch_list if item["代號"] != del_ticker]
@@ -321,7 +329,15 @@ with tab3:
                     results.append({"代號": tk, "名稱": nm, "評分": sc, "現價": round(float(df_t['Close'].iloc[-1]), 2), "AI 建議": adv})
             
             top5 = sorted(results, key=lambda x: x["評分"], reverse=True)[:5]
-            st.dataframe(pd.DataFrame(top5), use_container_width=True, hide_index=True)
+            st.dataframe(
+                pd.DataFrame(top5),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    # 🌟 同樣針對 AI 建議欄位強制加寬
+                    "AI 建議": st.column_config.TextColumn("AI 建議", width=600)
+                }
+            )
 
 # ------------------------------------------
 # Tab 4: 個股深度量化診斷
