@@ -68,11 +68,9 @@ def save_db(table_name, data):
 # ==========================================
 def smart_search_taiwan_stock(query):
     query = str(query).strip()
-    # 如果全為數字，預設先加 .TW
     if query.isdigit(): 
         return f"{query}.TW"
     
-    # 呼叫 Yahoo API 進行中文搜尋
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}&quotesCount=5"
     try:
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3, verify=False)
@@ -90,7 +88,6 @@ def fetch_data(query_input):
         stock = yf.Ticker(ticker, session=yf_session)
         hist = stock.history(period="200d")
         
-        # 容錯：如果是 .TW 找不到，自動切換 .TWO
         if hist.empty and ticker.endswith('.TW'):
             ticker = ticker.replace('.TW', '.TWO')
             stock = yf.Ticker(ticker, session=yf_session)
@@ -98,7 +95,6 @@ def fetch_data(query_input):
             
         if hist.empty: return query_input, query_input, None, {}
         
-        # 抓取中文名稱
         name = ticker
         pure_id = ticker.split('.')[0]
         url = f"https://tw.stock.yahoo.com/quote/{pure_id}"
@@ -121,20 +117,17 @@ def compute_technical_indicators(df):
     df['MA60'] = close.rolling(60).mean()
     df['Vol_MA5'] = df['Volume'].rolling(5).mean()
     
-    # MACD
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # RSI
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # KD
     low_min9 = df['Low'].rolling(9).min()
     high_max9 = df['High'].rolling(9).max()
     rsv = (close - low_min9) / (high_max9 - low_min9 + 1e-9) * 100
@@ -151,7 +144,6 @@ def evaluate_multi_factors(df, info):
     close = latest['Close']
     ma5, ma20, ma60 = latest['MA5'], latest['MA20'], latest['MA60']
     
-    # 技術面評分
     if close > ma60: score += 20
     if close > ma20: score += 10
     if ma5 > ma20 > ma60: score += 10
@@ -161,7 +153,6 @@ def evaluate_multi_factors(df, info):
     if latest['Volume'] > latest['Vol_MA5'] and close > prev['Close']: score += 15
     elif close >= prev['Close']: score += 8
         
-    # 基本面評分
     pe = info.get('trailingPE', 0) or 0
     div_yield = info.get('dividendYield', 0) or 0
     if 0 < pe <= 20: score += 8
@@ -170,15 +161,18 @@ def evaluate_multi_factors(df, info):
     if div_yield >= 0.04: score += 7
     else: score += 3
 
-    # 行動建議與價格帶
+    # 🚦 動態邏輯修正：判斷是否有真實跌破季線
     if score >= 80:
-        advice = f"🟢(綠燈) 【{score}分 強勢買進】趨勢偏多！建議可於月線 ({ma20:.2f}) 附近逢低建立部位，以季線 ({ma60:.2f}) 為波段防守點。"
+        advice = f"🟢(綠燈) 【{score}分 強勢買進】趨勢偏多！建議可於月線 ({ma20:.2f}) 附近逢低建立部位，以季線 ({ma60:.2f}) 為防守。"
         light = "🟢"
     elif score >= 60:
-        advice = f"🟡(黃燈) 【{score}分 區間震盪】目前無明顯突破。建議等待回測季線 ({ma60:.2f}) 量縮止跌再進場，逢高調節。"
+        advice = f"🟡(黃燈) 【{score}分 區間震盪】目前無明顯突破。建議等待回測季線 ({ma60:.2f}) 量縮止跌再進場。"
         light = "🟡"
     else:
-        advice = f"🔴(紅燈) 【{score}分 偏空/觀望】跌破季線趨勢轉弱。風險大請謹慎操作，強烈建議反彈至月線 ({ma20:.2f}) 減碼，空手者勿接刀！"
+        if close < ma60:
+            advice = f"🔴(紅燈) 【{score}分 偏空觀望】已跌破季線趨勢轉弱。風險大請謹慎，建議反彈至月線 ({ma20:.2f}) 減碼！"
+        else:
+            advice = f"🔴(紅燈) 【{score}分 動能轉弱】目前雖撐在季線上，但指標轉弱。若跌破季線 ({ma60:.2f}) 請停損，逢高減碼。"
         light = "🔴"
         
     return score, advice, light
@@ -232,7 +226,7 @@ st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["🔭 觀察清單", "📦 我的庫存 (損益與避險)", "⭐ 每日 AI 量化精選 (Top 5)", "📊 個股深度量化診斷"])
 
 # ------------------------------------------
-# Tab 1: 觀察清單 (對齊桌面版介面)
+# Tab 1: 觀察清單
 # ------------------------------------------
 with tab1:
     c1, c2 = st.columns([4, 1])
@@ -264,12 +258,13 @@ with tab1:
                 else: st.error("查無此股票！")
 
     if user_watch_list:
+        # 🌟 關閉 use_container_width，並設定極寬尺寸強制啟動卷軸
         st.dataframe(
             pd.DataFrame(user_watch_list), 
-            use_container_width=True, 
+            use_container_width=False, 
+            width=1800,
             hide_index=True,
             column_config={
-                # 🌟 強制設定寬度為 600px，這樣表格就會自動出現左右拉動的卷軸
                 "進場建議 (多因子評分)": st.column_config.TextColumn("進場建議 (多因子評分)", width=600)
             }
         )
@@ -318,7 +313,6 @@ with tab3:
     st.subheader("⭐ 盤後 AI 運算強勢股 (即時掃描大型權值/熱門股)")
     if st.button("🚀 啟動今日 AI 掃描"):
         with st.spinner("AI 量化引擎掃描中...這可能需要幾十秒鐘..."):
-            # 建立熱門池
             hot_stocks = ['2330', '2317', '2454', '2308', '2881', '2603', '3231', '2382', '2891', '2345', '1519', '3034']
             results = []
             for s in hot_stocks:
@@ -329,12 +323,14 @@ with tab3:
                     results.append({"代號": tk, "名稱": nm, "評分": sc, "現價": round(float(df_t['Close'].iloc[-1]), 2), "AI 建議": adv})
             
             top5 = sorted(results, key=lambda x: x["評分"], reverse=True)[:5]
+            
+            # 🌟 同樣關閉自動縮放，並給予大寬度產生卷軸
             st.dataframe(
                 pd.DataFrame(top5),
-                use_container_width=True,
+                use_container_width=False, 
+                width=1800,
                 hide_index=True,
                 column_config={
-                    # 🌟 同樣針對 AI 建議欄位強制加寬
                     "AI 建議": st.column_config.TextColumn("AI 建議", width=600)
                 }
             )
