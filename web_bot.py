@@ -28,26 +28,20 @@ yf_session.headers.update({
 # ==========================================
 def init_gsheet():
     try:
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            
-            # 👇 加入這行無敵代碼！強制把普通字串的 \n 轉回真正的換行符號
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-            
+        if "GCP_JSON" in st.secrets:
+            # 直接以標準 JSON 載入，原生保留 \n 換行符號
+            creds_dict = json.loads(st.secrets["GCP_JSON"])
             scopes = [
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive"
             ]
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             client = gspread.authorize(creds)
-            # 開啟我們剛才建立的 Google 試算表
             sheet = client.open("量化終端機_DB")
             return sheet
     except Exception as e:
         st.warning(f"⚠️ 雲端資料庫連線提示: {e}")
     return None
-
-sheet_db = init_gsheet()
 
 # 載入與儲存函式（自動切換雲端或本地）
 def load_db(table_name, default_val):
