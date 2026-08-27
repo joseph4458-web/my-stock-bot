@@ -1,6 +1,6 @@
 streamlit
-yfinance
 pandas
-requests
+numpy
+yfinance>=0.2.37
 gspread
 google-auth
