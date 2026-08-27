@@ -112,10 +112,41 @@ def smart_search_taiwan_stock(query):
             
     return query
 
+# ==========================================
+# 專屬台股 API：FinMind 基礎資料抓取 (路線 A)
+# ==========================================
+@st.cache_data(ttl=86400) # 快取 24 小時，每天只抓一次，10個同事用也不會爆量！
+def get_taiwan_fundamentals(ticker):
+    pure_id = ticker.split('.')[0]
+    # 預設為 0，避免文字 'N/A' 造成數學運算錯誤
+    fm_info = {
+        'trailingPE': 0.0, 
+        'priceToBook': 0.0, 
+        'dividendYield': 0.0
+    }
+    try:
+        # 抓取近 30 天的本益比、本淨比、殖利率
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPERatingDividendYield&data_id={pure_id}&start_date={start_date}"
+        
+        res = requests.get(url, timeout=5).json()
+        if res.get('msg') == 'success' and len(res.get('data', [])) > 0:
+            latest = res['data'][-1]
+            # 將 FinMind 的欄位轉換為系統認得的格式
+            if latest.get('PER'): fm_info['trailingPE'] = float(latest['PER'])
+            if latest.get('PBR'): fm_info['priceToBook'] = float(latest['PBR'])
+            if latest.get('dividend_yield'): fm_info['dividendYield'] = float(latest['dividend_yield']) / 100
+    except Exception:
+        pass
+        
+    return fm_info
+
+# ==========================================
+# 資料讀取引擎 (Yahoo + FinMind 雙重容錯)
+# ==========================================
 def fetch_data(query_input):
     ticker = smart_search_taiwan_stock(query_input)
     try:
-        # 🌟 移除自訂 session，讓 yfinance 使用最新內建的防阻擋機制
         stock = yf.Ticker(ticker)
         hist = stock.history(period="200d")
         
@@ -133,17 +164,24 @@ def fetch_data(query_input):
         try:
             res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3, verify=False)
             if res.status_code == 200 and "<title>" in res.text:
-                title = res.text.split("<title>")[1].split("</title>")[0]
-                name = title.split("(")[0].strip()
-        except:
-            pass
+                name = res.text.split("<title>")[1].split("(")[0].strip()
+        except: pass
             
-        # 🌟 雙重容錯：獨立抓取 info。若 Yahoo 封鎖 info，系統仍能靠報價算出技術面分數！
+        # 1. 先嘗試向 Yahoo 拿資料
         info = {}
-        try:
-            info = stock.info
-        except:
-            pass
+        try: info = stock.info
+        except: pass
+        
+        # 2. 啟動路線 A：呼叫 FinMind 專屬台股 API
+        fm_info = get_taiwan_fundamentals(ticker)
+        
+        # 3. 雙重容錯合併：如果 Yahoo 沒有數據 (N/A 或 0)，就用 FinMind 的精準數據補上！
+        if not info.get('trailingPE') or info.get('trailingPE') == 'N/A':
+            info['trailingPE'] = fm_info['trailingPE']
+        if not info.get('priceToBook') or info.get('priceToBook') == 'N/A':
+            info['priceToBook'] = fm_info['priceToBook']
+        if not info.get('dividendYield') or info.get('dividendYield') == 0:
+            info['dividendYield'] = fm_info['dividendYield']
             
         return ticker, name, hist, info
     except:
