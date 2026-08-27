@@ -113,36 +113,37 @@ def smart_search_taiwan_stock(query):
     return query
 
 # ==========================================
-# 專屬台股 API：FinMind 基礎資料抓取 (路線 A)
+# 專屬台股 API：證交所/櫃買中心 OpenAPI (官方穩定版)
 # ==========================================
-@st.cache_data(ttl=86400) # 快取 24 小時，每天只抓一次，10個同事用也不會爆量！
-def get_taiwan_fundamentals(ticker):
-    pure_id = ticker.split('.')[0]
-    # 預設為 0，避免文字 'N/A' 造成數學運算錯誤
-    fm_info = {
-        'trailingPE': 0.0, 
-        'priceToBook': 0.0, 
-        'dividendYield': 0.0
-    }
+@st.cache_data(ttl=3600)
+def get_tw_stock_valuation():
+    valuation_data = {}
+    # 1. 抓取上市股票 (TWSE)
     try:
-        # 抓取近 30 天的本益比、本淨比、殖利率
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
-        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPERatingDividendYield&data_id={pure_id}&start_date={start_date}"
+        res_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", timeout=5).json()
+        for item in res_twse:
+            valuation_data[item.get("Code")] = {
+                "PE": item.get("PeRatio", "N/A"),
+                "PB": item.get("PbRatio", "N/A"),
+                "Yield": item.get("DividendYield", "N/A")
+            }
+    except: pass
         
-        res = requests.get(url, timeout=5).json()
-        if res.get('msg') == 'success' and len(res.get('data', [])) > 0:
-            latest = res['data'][-1]
-            # 將 FinMind 的欄位轉換為系統認得的格式
-            if latest.get('PER'): fm_info['trailingPE'] = float(latest['PER'])
-            if latest.get('PBR'): fm_info['priceToBook'] = float(latest['PBR'])
-            if latest.get('dividend_yield'): fm_info['dividendYield'] = float(latest['dividend_yield']) / 100
-    except Exception:
-        pass
+    # 2. 抓取上櫃股票 (TPEx)
+    try:
+        res_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis", timeout=5).json()
+        for item in res_tpex:
+            valuation_data[item.get("SecuritiesCompanyCode")] = {
+                "PE": item.get("PERatio", "N/A"),
+                "PB": item.get("PBratio", "N/A"),
+                "Yield": item.get("YieldRatio", "N/A")
+            }
+    except: pass
         
-    return fm_info
+    return valuation_data
 
 # ==========================================
-# 資料讀取引擎 (Yahoo + FinMind 雙重容錯)
+# 資料讀取引擎 (Yahoo + 官方 OpenAPI 雙重引擎)
 # ==========================================
 def fetch_data(query_input):
     ticker = smart_search_taiwan_stock(query_input)
@@ -167,21 +168,26 @@ def fetch_data(query_input):
                 name = res.text.split("<title>")[1].split("(")[0].strip()
         except: pass
             
-        # 1. 先嘗試向 Yahoo 拿資料
+        # 1. 取得 Yahoo 剩餘可用的基本資訊 (通常 EPS/ROE 會被雲端擋下回傳空值)
         info = {}
         try: info = stock.info
         except: pass
         
-        # 2. 啟動路線 A：呼叫 FinMind 專屬台股 API
-        fm_info = get_taiwan_fundamentals(ticker)
+        # 2. 強制寫入官方 OpenAPI 的估值數據 (解決第三方阻擋問題)
+        val_db = get_tw_stock_valuation()
+        val = val_db.get(pure_id, {})
         
-        # 3. 雙重容錯合併：如果 Yahoo 沒有數據 (N/A 或 0)，就用 FinMind 的精準數據補上！
-        if not info.get('trailingPE') or info.get('trailingPE') == 'N/A':
-            info['trailingPE'] = fm_info['trailingPE']
-        if not info.get('priceToBook') or info.get('priceToBook') == 'N/A':
-            info['priceToBook'] = fm_info['priceToBook']
-        if not info.get('dividendYield') or info.get('dividendYield') == 0:
-            info['dividendYield'] = fm_info['dividendYield']
+        pe_str = val.get("PE", "N/A")
+        try: info['trailingPE'] = float(pe_str)
+        except: info['trailingPE'] = 'N/A'
+        
+        pb_str = val.get("PB", "N/A")
+        try: info['priceToBook'] = float(pb_str)
+        except: info['priceToBook'] = 'N/A'
+        
+        dy_str = val.get("Yield", "N/A")
+        try: info['dividendYield'] = float(dy_str) / 100
+        except: info['dividendYield'] = 'N/A'
             
         return ticker, name, hist, info
     except:
@@ -247,11 +253,16 @@ def evaluate_multi_factors(df, info):
     if latest['Volume'] > latest['Vol_MA5'] and close > prev['Close']: score += 15
     elif close >= prev['Close']: score += 8
         
-    pe = info.get('trailingPE', 0) or 0
-    div_yield = info.get('dividendYield', 0) or 0
+    # 安全解析數值，避免 N/A 造成系統當機
+    try: pe = float(info.get('trailingPE', 0))
+    except: pe = 0
+    try: div_yield = float(info.get('dividendYield', 0))
+    except: div_yield = 0
+    
     if 0 < pe <= 20: score += 8
     elif pe > 35: score += 2
     else: score += 5
+    
     if div_yield >= 0.04: score += 7
     else: score += 3
 
@@ -546,9 +557,13 @@ with tab4:
                     
                 with col_b:
                     st.markdown("### ⚖️ 估值與風險")
-                    st.write(f"**本益比 (PE):** {pe if type(pe)==str else round(pe, 2)}")
-                    st.write(f"**本淨比 (PB):** {t_info.get('priceToBook', 'N/A')}")
-                    st.write(f"**現金殖利率:** {t_info.get('dividendYield', 0)*100:.2f}%")
+                    pe = t_info.get('trailingPE', 'N/A')
+                    pb = t_info.get('priceToBook', 'N/A')
+                    dy = t_info.get('dividendYield', 'N/A')
+                    
+                    st.write(f"**本益比 (PE):** {pe if isinstance(pe, str) else round(pe, 2)}")
+                    st.write(f"**本淨比 (PB):** {pb if isinstance(pb, str) else round(pb, 2)}")
+                    st.write(f"**現金殖利率:** {f'{dy*100:.2f}%' if isinstance(dy, (int, float)) else 'N/A'}")
                     st.write("*陷阱：單看PE容易忽略成長性與資本結構；估值需結合產業生命周期。*")
                     
                 with col_c:
