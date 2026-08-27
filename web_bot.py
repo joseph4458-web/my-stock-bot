@@ -189,10 +189,17 @@ def get_market_status():
     except: return "⚠️ 大盤連線失敗"
 
 # ==========================================
+# 快取機制防護 (避免 APIError 429)
+# ==========================================
+@st.cache_data(ttl=600)
+def get_cached_auth_db():
+    return load_db("users_auth", [])
+
+# ==========================================
 # 登入系統
 # ==========================================
 if 'username' not in st.session_state: st.session_state.username = None
-auth_db = load_db("users_auth", [])
+auth_db = get_cached_auth_db()
 auth_dict = {item["username"]: item["password"] for item in auth_db}
 
 if st.session_state.username is None:
@@ -208,6 +215,7 @@ if st.session_state.username is None:
             elif u_in not in auth_dict:
                 auth_dict[u_in] = p_in
                 save_db("users_auth", [{"username": k, "password": v} for k, v in auth_dict.items()])
+                st.cache_data.clear() # 清除快取以抓取新帳號
                 st.session_state.username = u_in
                 st.rerun()
             else: st.error("❌ 密碼錯誤！")
@@ -216,8 +224,15 @@ if st.session_state.username is None:
 username = st.session_state.username
 user_watch_key = f"watch_{username}"
 user_port_key = f"port_{username}"
-user_watch_list = load_db(user_watch_key, [])
-user_portfolio = load_db(user_port_key, [])
+
+# 記憶體快取：只在剛登入時讀取一次，避免瘋狂存取 Google Sheets
+if 'data_loaded_for' not in st.session_state or st.session_state.data_loaded_for != username:
+    st.session_state.user_watch_list = load_db(user_watch_key, [])
+    st.session_state.user_portfolio = load_db(user_port_key, [])
+    st.session_state.data_loaded_for = username
+
+user_watch_list = st.session_state.user_watch_list
+user_portfolio = st.session_state.user_portfolio
 
 # ==========================================
 # 側邊欄 (使用者資訊與系統更新)
@@ -232,6 +247,10 @@ with st.sidebar:
         with st.spinner("正在同步雲端資料與最新報價，請稍候..."):
             st.cache_data.clear() 
             
+            # 強制從雲端抓取最新清單，防多裝置衝突
+            user_watch_list = load_db(user_watch_key, [])
+            user_portfolio = load_db(user_port_key, [])
+            
             # 更新觀察清單
             for item in user_watch_list:
                 tk, nm, hist, inf = fetch_data(item["代號"])
@@ -240,13 +259,12 @@ with st.sidebar:
                     sc, adv, lgt = evaluate_multi_factors(df_tech, inf)
                     item["現價"] = round(float(df_tech['Close'].iloc[-1]), 2)
                     change = df_tech['Close'].iloc[-1] - df_tech['Close'].iloc[-2]
-                    change_pct = (change / df_tech['Close'].iloc[-2]) * 100
-                    item["漲跌行情"] = f"{change:+.2f} ({change_pct:+.2f}%)"
+                    item["漲跌行情"] = f"{change:+.2f} ({(change / df_tech['Close'].iloc[-2]) * 100:+.2f}%)"
                     item["季線"] = round(float(df_tech['MA60'].iloc[-1]), 2)
                     item["進場建議 (多因子評分)"] = adv
             save_db(user_watch_key, user_watch_list)
             
-            # 更新庫存清單 (加入最新AI行動指南)
+            # 更新庫存清單
             for item in user_portfolio:
                 tk, nm, hist, inf = fetch_data(item["代號"])
                 if hist is not None and not hist.empty:
@@ -264,12 +282,17 @@ with st.sidebar:
                     item["行動指南"] = adv
             save_db(user_port_key, user_portfolio)
             
+            # 同步更新回記憶體
+            st.session_state.user_watch_list = user_watch_list
+            st.session_state.user_portfolio = user_portfolio
+            
         st.success("✅ 資料同步與評分更新完成！")
         time.sleep(1)
         st.rerun()
 
     if st.button("🚪 登出系統", use_container_width=True):
         st.session_state.username = None
+        st.session_state.data_loaded_for = None
         st.rerun()
 
 st.markdown(f"<h3 style='text-align: center; color: #333;'>{get_market_status()}</h3>", unsafe_allow_html=True)
@@ -294,24 +317,20 @@ with tab1:
                     score, advice, light = evaluate_multi_factors(df_tech, info)
                     latest_p = df_tech['Close'].iloc[-1]
                     change = latest_p - df_tech['Close'].iloc[-2]
-                    change_pct = (change / df_tech['Close'].iloc[-2]) * 100
                     
-                    user_watch_list = [item for item in user_watch_list if item.get('代號') != ticker]
-                    user_watch_list.append({
-                        "代號": ticker,
-                        "名稱": name,
-                        "現價": round(float(latest_p), 2),
-                        "漲跌行情": f"{change:+.2f} ({change_pct:+.2f}%)",
-                        "季線": round(float(df_tech['MA60'].iloc[-1]), 2),
-                        "進場建議 (多因子評分)": advice
+                    st.session_state.user_watch_list = [item for item in st.session_state.user_watch_list if item.get('代號') != ticker]
+                    st.session_state.user_watch_list.append({
+                        "代號": ticker, "名稱": name, "現價": round(float(latest_p), 2),
+                        "漲跌行情": f"{change:+.2f} ({(change / df_tech['Close'].iloc[-2]) * 100:+.2f}%)",
+                        "季線": round(float(df_tech['MA60'].iloc[-1]), 2), "進場建議 (多因子評分)": advice
                     })
-                    save_db(user_watch_key, user_watch_list)
+                    save_db(user_watch_key, st.session_state.user_watch_list)
                     st.rerun()
                 else: st.error("查無此股票！")
 
-    if user_watch_list:
+    if st.session_state.user_watch_list:
         st.dataframe(
-            pd.DataFrame(user_watch_list), 
+            pd.DataFrame(st.session_state.user_watch_list), 
             use_container_width=False, 
             width=1800,
             hide_index=True,
@@ -319,10 +338,10 @@ with tab1:
                 "進場建議 (多因子評分)": st.column_config.TextColumn("進場建議 (多因子評分)", width=600)
             }
         )
-        del_ticker = st.selectbox("選擇要刪除的標的：", [item["代號"] for item in user_watch_list], key="del_w")
+        del_ticker = st.selectbox("選擇要刪除的標的：", [item["代號"] for item in st.session_state.user_watch_list], key="del_w")
         if st.button("🗑️ 刪除選取標的"):
-            user_watch_list = [item for item in user_watch_list if item["代號"] != del_ticker]
-            save_db(user_watch_key, user_watch_list)
+            st.session_state.user_watch_list = [item for item in st.session_state.user_watch_list if item["代號"] != del_ticker]
+            save_db(user_watch_key, st.session_state.user_watch_list)
             st.rerun()
 
 # ------------------------------------------
@@ -342,30 +361,27 @@ with tab2:
                 if hist is not None and not hist.empty:
                     df_tech = compute_technical_indicators(hist)
                     score, advice, light = evaluate_multi_factors(df_tech, info)
-                    
                     curr_price = float(hist['Close'].iloc[-1])
                     cost_total = int(p_cost * p_shares)
                     market_val = int(curr_price * p_shares)
-                    user_portfolio.append({
+                    
+                    st.session_state.user_portfolio.append({
                         "代號": ticker, "名稱": name, "股數": p_shares, "買進均價": p_cost,
                         "目前現價": round(curr_price, 2), "總成本": cost_total, "總市值": market_val,
                         "損益金額": market_val - cost_total, "報酬率": f"{((curr_price-p_cost)/p_cost)*100:+.2f}%",
                         "行動指南": advice
                     })
-                    save_db(user_port_key, user_portfolio)
+                    save_db(user_port_key, st.session_state.user_portfolio)
                     st.rerun()
+                else: st.error("查無此股票！")
     
-    if user_portfolio:
-        df_p = pd.DataFrame(user_portfolio).fillna("")
-        
-        # 清除舊版重複的報酬率欄位
-        if '報酬率 (%)' in df_p.columns and '報酬率' in df_p.columns:
-            df_p = df_p.drop(columns=['報酬率 (%)'])
+    if st.session_state.user_portfolio:
+        df_p = pd.DataFrame(st.session_state.user_portfolio).fillna("")
+        if '報酬率 (%)' in df_p.columns and '報酬率' in df_p.columns: df_p = df_p.drop(columns=['報酬率 (%)'])
             
         total_pnl = df_p['損益金額'].replace("", 0).sum() if '損益金額' in df_p.columns else 0
         st.metric("總體未實現損益", f"${int(total_pnl):+,}", delta=f"{int(total_pnl):+,}")
         
-        # 🌟 同樣關閉自動縮放，並給予大寬度產生卷軸
         st.dataframe(
             df_p, 
             use_container_width=False, 
@@ -376,11 +392,11 @@ with tab2:
             }
         )
         
-        del_p_idx = st.selectbox("選擇要結清/移除的持股：", range(len(user_portfolio)), 
-                                 format_func=lambda x: f"{user_portfolio[x].get('名稱', '')} ({user_portfolio[x].get('代號', '')})")
+        del_p_idx = st.selectbox("選擇要結清/移除的持股：", range(len(st.session_state.user_portfolio)), 
+                                 format_func=lambda x: f"{st.session_state.user_portfolio[x].get('名稱', '')} ({st.session_state.user_portfolio[x].get('代號', '')})")
         if st.button("🗑️ 移除此筆庫存"):
-            user_portfolio.pop(del_p_idx)
-            save_db(user_port_key, user_portfolio)
+            st.session_state.user_portfolio.pop(del_p_idx)
+            save_db(user_port_key, st.session_state.user_portfolio)
             st.rerun()
 
 # ------------------------------------------
@@ -388,7 +404,7 @@ with tab2:
 # ------------------------------------------
 with tab3:
     st.subheader("⭐ 盤後 AI 運算強勢股 (即時掃描大型權值/熱門股)")
-    if st.button("🚀 啟動今日 AI 掃描"):
+    if st.button("🚀 啟提今日 AI 掃描"):
         with st.spinner("AI 量化引擎掃描中...這可能需要幾十秒鐘..."):
             hot_stocks = ['2330', '2317', '2454', '2308', '2881', '2603', '3231', '2382', '2891', '2345', '1519', '3034']
             results = []
@@ -399,16 +415,12 @@ with tab3:
                     sc, adv, lgt = evaluate_multi_factors(df_t, inf)
                     results.append({"代號": tk, "名稱": nm, "評分": sc, "現價": round(float(df_t['Close'].iloc[-1]), 2), "AI 建議": adv})
             
-            top5 = sorted(results, key=lambda x: x["評分"], reverse=True)[:5]
-            
             st.dataframe(
-                pd.DataFrame(top5),
+                pd.DataFrame(sorted(results, key=lambda x: x["評分"], reverse=True)[:5]),
                 use_container_width=False, 
                 width=1800,
                 hide_index=True,
-                column_config={
-                    "AI 建議": st.column_config.TextColumn("AI 建議", width=600)
-                }
+                column_config={"AI 建議": st.column_config.TextColumn("AI 建議", width=600)}
             )
 
 # ------------------------------------------
