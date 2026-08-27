@@ -68,44 +68,100 @@ def save_db(table_name, data):
 # ==========================================
 def smart_search_taiwan_stock(query):
     query = str(query).strip()
+    
+    # 1. 如果輸入純數字，自動補上 .TW
     if query.isdigit(): 
         return f"{query}.TW"
+        
+    # 2. 內建常見台股與 ETF 對照表 (雲端防擋機制，瞬間查詢)
+    common_stocks = {
+        "台泥": "1101.TW", "亞泥": "1102.TW", "統一": "1216.TW", "台塑": "1301.TW",
+        "南亞": "1303.TW", "台化": "1326.TW", "中鋼": "2002.TW", "台積電": "2330.TW",
+        "聯電": "2303.TW", "鴻海": "2317.TW", "聯發科": "2454.TW", "長榮": "2603.TW",
+        "陽明": "2609.TW", "萬海": "2615.TW", "富邦金": "2881.TW", "國泰金": "2882.TW",
+        "兆豐金": "2886.TW", "中信金": "2891.TW", "元大金": "2885.TW", "玉山金": "2884.TW",
+        "大立光": "3008.TW", "台達電": "2308.TW", "廣達": "2382.TW", "緯創": "3231.TW",
+        "日月光": "3711.TW", "中華電": "2412.TW", "華碩": "2357.TW", "技嘉": "2376.TW",
+        "神隆": "1789.TW", "由田": "3455.TWO", "群創": "3481.TW", "捷泰": "8064.TWO",
+        "元大高股息": "0056.TW", "元大台灣50": "0050.TW", "國泰永續高股息": "00878.TW", "富邦台50": "006208.TW"
+    }
+    if query in common_stocks:
+        return common_stocks[query]
     
-    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}&quotesCount=5"
-    try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3, verify=False)
-        data = res.json()
-        for q in data.get('quotes', []):
-            sym = q.get('symbol', '')
-            if sym.endswith('.TW') or sym.endswith('.TWO'):
-                return sym
-    except: pass
+    # 3. 呼叫 Yahoo API 進行中文搜尋 (加入備用網址與偽裝 Headers)
+    urls = [
+        f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}&quotesCount=5",
+        f"https://query1.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}&quotesCount=5"
+    ]
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+    
+    for url in urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=3, verify=False)
+            if res.status_code == 200:
+                data = res.json()
+                for q in data.get('quotes', []):
+                    sym = q.get('symbol', '')
+                    if sym.endswith('.TW') or sym.endswith('.TWO'):
+                        return sym
+        except:
+            continue
+            
     return query
 
 def fetch_data(query_input):
     ticker = smart_search_taiwan_stock(query_input)
     try:
-        stock = yf.Ticker(ticker, session=yf_session)
+        # 🌟 移除自訂 session，讓 yfinance 使用最新內建的防阻擋機制
+        stock = yf.Ticker(ticker)
         hist = stock.history(period="200d")
         
         if hist.empty and ticker.endswith('.TW'):
             ticker = ticker.replace('.TW', '.TWO')
-            stock = yf.Ticker(ticker, session=yf_session)
+            stock = yf.Ticker(ticker)
             hist = stock.history(period="200d")
             
         if hist.empty: return query_input, query_input, None, {}
         
+        # 抓取中文名稱
         name = ticker
         pure_id = ticker.split('.')[0]
         url = f"https://tw.stock.yahoo.com/quote/{pure_id}"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3, verify=False)
-        if res.status_code == 200 and "<title>" in res.text:
-            title = res.text.split("<title>")[1].split("</title>")[0]
-            name = title.split("(")[0].strip()
+        try:
+            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3, verify=False)
+            if res.status_code == 200 and "<title>" in res.text:
+                title = res.text.split("<title>")[1].split("</title>")[0]
+                name = title.split("(")[0].strip()
+        except:
+            pass
             
-        return ticker, name, hist, stock.info
+        # 🌟 雙重容錯：獨立抓取 info。若 Yahoo 封鎖 info，系統仍能靠報價算出技術面分數！
+        info = {}
+        try:
+            info = stock.info
+        except:
+            pass
+            
+        return ticker, name, hist, info
     except:
         return query_input, query_input, None, {}
+
+@st.cache_data(ttl=1800)
+def get_market_status():
+    try:
+        # 🌟 同樣移除 session，避免大盤也被 Yahoo 阻擋
+        twii = yf.Ticker("^TWII").history(period="100d")
+        if twii.empty: return "⚠️ 大盤連線失敗 (回傳為空)"
+        close = twii['Close'].iloc[-1]
+        ma60 = twii['Close'].rolling(60).mean().iloc[-1]
+        status = "多頭格局" if close > ma60 else "空頭防禦"
+        today_str = datetime.datetime.now().strftime("%m/%d")
+        return f"☑️ 【台股大盤】目前 {close:.2f} 點 (季線 {ma60:.2f}，{status}) [最終狀態: {today_str}]"
+    except Exception as e: 
+        return f"⚠️ 大盤連線失敗 ({e})"
 
 # ==========================================
 # 量化指標計算與策略引擎
