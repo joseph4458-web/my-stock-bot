@@ -1,6 +1,0 @@
-streamlit
-pandas
-numpy
-yfinance>=0.2.37
-gspread
-google-auth
