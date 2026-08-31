@@ -118,22 +118,24 @@ def smart_search_taiwan_stock(query):
 @st.cache_data(ttl=3600)
 def get_tw_stock_valuation():
     valuation_data = {}
-    # 1. 抓取上市股票 (TWSE)
+    # 1. 抓取上市股票 (TWSE) - 同時抓取名稱與估值
     try:
         res_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", timeout=5).json()
         for item in res_twse:
             valuation_data[item.get("Code")] = {
+                "Name": item.get("Name", "").strip(),
                 "PE": item.get("PeRatio", "N/A"),
                 "PB": item.get("PbRatio", "N/A"),
                 "Yield": item.get("DividendYield", "N/A")
             }
     except: pass
         
-    # 2. 抓取上櫃股票 (TPEx)
+    # 2. 抓取上櫃股票 (TPEx) - 同時抓取名稱與估值
     try:
         res_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis", timeout=5).json()
         for item in res_tpex:
             valuation_data[item.get("SecuritiesCompanyCode")] = {
+                "Name": item.get("CompanyName", "").strip(),
                 "PE": item.get("PERatio", "N/A"),
                 "PB": item.get("PBratio", "N/A"),
                 "Yield": item.get("YieldRatio", "N/A")
@@ -158,34 +160,37 @@ def fetch_data(query_input):
             
         if hist.empty: return query_input, query_input, None, {}
         
-        # 抓取中文名稱
-        name = ticker
         pure_id = ticker.split('.')[0]
-        url = f"https://tw.stock.yahoo.com/quote/{pure_id}"
-        try:
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3, verify=False)
-            if res.status_code == 200 and "<title>" in res.text:
-                name = res.text.split("<title>")[1].split("(")[0].strip()
-        except: pass
+        val_db = get_tw_stock_valuation()
+        val = val_db.get(pure_id, {})
+        
+        # 🌟 1. 名稱修復：優先使用官方快取名稱，100% 免疫 Yahoo 阻擋！
+        name = val.get("Name")
+        if not name:
+            # 備用：若官方沒資料，才去爬 Yahoo
+            name = ticker
+            url = f"https://tw.stock.yahoo.com/quote/{pure_id}"
+            try:
+                res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3, verify=False)
+                if res.status_code == 200 and "<title>" in res.text:
+                    name = res.text.split("<title>")[1].split("(")[0].strip()
+            except: pass
             
-        # 1. 取得 Yahoo 剩餘可用的基本資訊 (通常 EPS/ROE 會被雲端擋下回傳空值)
+        # 2. 取得 Yahoo 基本資訊
         info = {}
         try: info = stock.info
         except: pass
         
-        # 2. 強制寫入官方 OpenAPI 的估值數據 (解決第三方阻擋問題)
-        val_db = get_tw_stock_valuation()
-        val = val_db.get(pure_id, {})
-        
-        pe_str = val.get("PE", "N/A")
+        # 🌟 3. 估值修復：安全清理官方資料（避開逗號或減號造成當機）
+        pe_str = str(val.get("PE", "N/A")).replace(",", "")
         try: info['trailingPE'] = float(pe_str)
         except: info['trailingPE'] = 'N/A'
         
-        pb_str = val.get("PB", "N/A")
+        pb_str = str(val.get("PB", "N/A")).replace(",", "")
         try: info['priceToBook'] = float(pb_str)
         except: info['priceToBook'] = 'N/A'
         
-        dy_str = val.get("Yield", "N/A")
+        dy_str = str(val.get("Yield", "N/A")).replace(",", "")
         try: info['dividendYield'] = float(dy_str) / 100
         except: info['dividendYield'] = 'N/A'
             
@@ -548,11 +553,13 @@ with tab4:
                 
                 with col_a:
                     st.markdown("### 🏢 基本面 (公司價值)")
-                    pe = t_info.get('trailingPE', 'N/A')
-                    roe = t_info.get('returnOnEquity', 0) * 100 if t_info.get('returnOnEquity') else 'N/A'
-                    st.write(f"**EPS (每股盈餘):** {t_info.get('trailingEps', 'N/A')}")
-                    st.write(f"**ROE (股東權益報酬率):** {roe if type(roe)==str else round(roe, 2)}%")
-                    st.write(f"**毛利率:** {t_info.get('grossMargins', 0)*100:.2f}%")
+                    eps = t_info.get('trailingEps', 'N/A')
+                    roe = t_info.get('returnOnEquity', 'N/A')
+                    gm = t_info.get('grossMargins', 'N/A')
+                    
+                    st.write(f"**EPS (每股盈餘):** {f'{eps:.2f}' if isinstance(eps, (int, float)) else '-'}")
+                    st.write(f"**ROE (股東權益報酬):** {f'{roe*100:.2f}%' if isinstance(roe, (int, float)) else '-'}")
+                    st.write(f"**毛利率:** {f'{gm*100:.2f}%' if isinstance(gm, (int, float)) else '-'}")
                     st.write("*用途：看獲利品質與趨勢，ROE過高需檢視資本結構是否有風險。*")
                     
                 with col_b:
@@ -561,9 +568,9 @@ with tab4:
                     pb = t_info.get('priceToBook', 'N/A')
                     dy = t_info.get('dividendYield', 'N/A')
                     
-                    st.write(f"**本益比 (PE):** {pe if isinstance(pe, str) else round(pe, 2)}")
-                    st.write(f"**本淨比 (PB):** {pb if isinstance(pb, str) else round(pb, 2)}")
-                    st.write(f"**現金殖利率:** {f'{dy*100:.2f}%' if isinstance(dy, (int, float)) else 'N/A'}")
+                    st.write(f"**本益比 (PE):** {f'{pe:.2f}' if isinstance(pe, (int, float)) else '-'}")
+                    st.write(f"**本淨比 (PB):** {f'{pb:.2f}' if isinstance(pb, (int, float)) else '-'}")
+                    st.write(f"**現金殖利率:** {f'{dy*100:.2f}%' if isinstance(dy, (int, float)) else '-'}")
                     st.write("*陷阱：單看PE容易忽略成長性與資本結構；估值需結合產業生命周期。*")
                     
                 with col_c:
