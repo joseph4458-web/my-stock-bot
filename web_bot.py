@@ -145,7 +145,7 @@ def get_tw_stock_valuation():
     return valuation_data
 
 # ==========================================
-# 資料讀取引擎 (Yahoo + 官方 OpenAPI 雙重引擎)
+# 資料讀取引擎 (Yahoo + 官方 OpenAPI 智慧雙重引擎)
 # ==========================================
 def fetch_data(query_input):
     ticker = smart_search_taiwan_stock(query_input)
@@ -164,10 +164,9 @@ def fetch_data(query_input):
         val_db = get_tw_stock_valuation()
         val = val_db.get(pure_id, {})
         
-        # 🌟 1. 名稱修復：優先使用官方快取名稱，100% 免疫 Yahoo 阻擋！
+        # 1. 名稱修復：優先使用官方快取名稱
         name = val.get("Name")
         if not name:
-            # 備用：若官方沒資料，才去爬 Yahoo
             name = ticker
             url = f"https://tw.stock.yahoo.com/quote/{pure_id}"
             try:
@@ -176,23 +175,29 @@ def fetch_data(query_input):
                     name = res.text.split("<title>")[1].split("(")[0].strip()
             except: pass
             
-        # 2. 取得 Yahoo 基本資訊
+        # 2. 先取得 Yahoo 基本資訊 (保留既有真實數據)
         info = {}
         try: info = stock.info
         except: pass
         
-        # 🌟 3. 估值修復：安全清理官方資料（避開逗號或減號造成當機）
-        pe_str = str(val.get("PE", "N/A")).replace(",", "")
-        try: info['trailingPE'] = float(pe_str)
-        except: info['trailingPE'] = 'N/A'
+        # 🌟 3. 雙重智慧合併：不強制覆蓋，誰有數字就用誰的！
+        # 處理 PE (本益比)
+        twse_pe = val.get("PE", "N/A")
+        if twse_pe not in ["N/A", "-", "", None]:
+            try: info['trailingPE'] = float(str(twse_pe).replace(",", ""))
+            except: pass
         
-        pb_str = str(val.get("PB", "N/A")).replace(",", "")
-        try: info['priceToBook'] = float(pb_str)
-        except: info['priceToBook'] = 'N/A'
+        # 處理 PB (本淨比)
+        twse_pb = val.get("PB", "N/A")
+        if twse_pb not in ["N/A", "-", "", None]:
+            try: info['priceToBook'] = float(str(twse_pb).replace(",", ""))
+            except: pass
         
-        dy_str = str(val.get("Yield", "N/A")).replace(",", "")
-        try: info['dividendYield'] = float(dy_str) / 100
-        except: info['dividendYield'] = 'N/A'
+        # 處理 現金殖利率
+        twse_dy = val.get("Yield", "N/A")
+        if twse_dy not in ["N/A", "-", "", None]:
+            try: info['dividendYield'] = float(str(twse_dy).replace(",", "")) / 100
+            except: pass
             
         return ticker, name, hist, info
     except:
